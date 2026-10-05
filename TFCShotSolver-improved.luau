@@ -13,29 +13,374 @@ for _, name in ipairs({"TFCAimHelper", "TFCShotSolver"}) do
 end
 local oldMarker = workspace:FindFirstChild("TFCAimTarget")
 if oldMarker then oldMarker:Destroy() end
+local SCRIPT_VERSION = "1.00"
+local TweenService = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+
 local gui = Instance.new("ScreenGui")
 gui.Name = "TFCShotSolver"
 gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 gui.Parent = pg
-local panel = Instance.new("TextLabel")
-panel.Size = UDim2.fromOffset(460, 110)
-panel.Position = UDim2.new(0.5, -230, 0, 30)
-panel.BackgroundColor3 = Color3.fromRGB(20, 25, 30)
-panel.TextColor3 = Color3.new(1, 1, 1)
-panel.TextSize = 16
-panel.TextWrapped = true
-panel.Text = "Ready. Choose a freekick, then press Solve & Shoot."
+
+local shadow = Instance.new("Frame")
+shadow.Name = "Shadow"
+shadow.AnchorPoint = Vector2.new(0.5, 0)
+shadow.Size = UDim2.fromOffset(500, 270)
+shadow.Position = UDim2.new(0.5, 4, 0, 34)
+shadow.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+shadow.BackgroundTransparency = 0.55
+shadow.BorderSizePixel = 0
+shadow.ZIndex = 0
+shadow.Parent = gui
+local shadowCorner = Instance.new("UICorner")
+shadowCorner.CornerRadius = UDim.new(0, 18)
+shadowCorner.Parent = shadow
+
+local panel = Instance.new("Frame")
+panel.Name = "MainPanel"
+panel.AnchorPoint = Vector2.new(0.5, 0)
+panel.Size = UDim2.fromOffset(500, 270)
+panel.Position = UDim2.new(0.5, 0, 0, 30)
+panel.BackgroundColor3 = Color3.fromRGB(17, 21, 29)
+panel.BorderSizePixel = 0
+panel.ZIndex = 1
 panel.Parent = gui
+
+local panelCorner = Instance.new("UICorner")
+panelCorner.CornerRadius = UDim.new(0, 18)
+panelCorner.Parent = panel
+
+local panelStroke = Instance.new("UIStroke")
+panelStroke.Color = Color3.fromRGB(72, 94, 135)
+panelStroke.Transparency = 0.22
+panelStroke.Thickness = 1.2
+panelStroke.Parent = panel
+
+local panelGradient = Instance.new("UIGradient")
+panelGradient.Color = ColorSequence.new({
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(29, 36, 50)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(15, 18, 26))
+})
+panelGradient.Rotation = 90
+panelGradient.Parent = panel
+
+local header = Instance.new("Frame")
+header.Name = "Header"
+header.BackgroundTransparency = 1
+header.Size = UDim2.new(1, 0, 0, 62)
+header.Parent = panel
+
+local title = Instance.new("TextLabel")
+title.Name = "Title"
+title.BackgroundTransparency = 1
+title.Position = UDim2.fromOffset(18, 10)
+title.Size = UDim2.fromOffset(260, 28)
+title.Font = Enum.Font.GothamBold
+title.Text = "TFC Shot Solver"
+title.TextColor3 = Color3.fromRGB(245, 247, 255)
+title.TextSize = 19
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Parent = header
+
+local versionLabel = Instance.new("TextLabel")
+versionLabel.Name = "VersionLabel"
+versionLabel.BackgroundTransparency = 1
+versionLabel.Position = UDim2.fromOffset(18, 36)
+versionLabel.Size = UDim2.fromOffset(150, 17)
+versionLabel.Font = Enum.Font.Gotham
+versionLabel.Text = "Version " .. SCRIPT_VERSION
+versionLabel.TextColor3 = Color3.fromRGB(138, 154, 185)
+versionLabel.TextSize = 11
+versionLabel.TextXAlignment = Enum.TextXAlignment.Left
+versionLabel.Parent = header
+
+local function setButtonColor(btn, color)
+    btn.BackgroundColor3 = color
+    btn:SetAttribute("TFCBaseColor", color)
+end
+
+local function styleButton(btn, color)
+    btn.AutoButtonColor = false
+    btn.BackgroundColor3 = color
+    btn:SetAttribute("TFCBaseColor", color)
+    btn.BorderSizePixel = 0
+    btn.TextColor3 = Color3.fromRGB(245, 247, 255)
+    btn.Font = Enum.Font.GothamSemibold
+    btn.TextSize = 14
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 10)
+    corner.Parent = btn
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(255, 255, 255)
+    stroke.Transparency = 0.86
+    stroke.Thickness = 1
+    stroke.Parent = btn
+
+    btn.MouseEnter:Connect(function()
+        local base = btn:GetAttribute("TFCBaseColor") or btn.BackgroundColor3
+        TweenService:Create(btn, TweenInfo.new(0.13), {
+            BackgroundColor3 = base:Lerp(Color3.new(1, 1, 1), 0.10)
+        }):Play()
+    end)
+
+    btn.MouseLeave:Connect(function()
+        local base = btn:GetAttribute("TFCBaseColor") or btn.BackgroundColor3
+        TweenService:Create(btn, TweenInfo.new(0.13), {
+            BackgroundColor3 = base
+        }):Play()
+    end)
+end
+
+local minimize = Instance.new("TextButton")
+minimize.Name = "MinimizeButton"
+minimize.Size = UDim2.fromOffset(30, 30)
+minimize.Position = UDim2.new(1, -78, 0, 11)
+minimize.Text = "—"
+minimize.Parent = header
+styleButton(minimize, Color3.fromRGB(55, 62, 78))
+
+local close = Instance.new("TextButton")
+close.Name = "CloseButton"
+close.Size = UDim2.fromOffset(30, 30)
+close.Position = UDim2.new(1, -42, 0, 11)
+close.Text = "×"
+close.TextSize = 18
+close.Parent = header
+styleButton(close, Color3.fromRGB(155, 60, 68))
+
+local divider = Instance.new("Frame")
+divider.Name = "Divider"
+divider.Size = UDim2.new(1, -36, 0, 1)
+divider.Position = UDim2.fromOffset(18, 61)
+divider.BorderSizePixel = 0
+divider.BackgroundColor3 = Color3.fromRGB(62, 76, 102)
+divider.BackgroundTransparency = 0.3
+divider.Parent = panel
+
+local tabBar = Instance.new("Frame")
+tabBar.Name = "TabBar"
+tabBar.BackgroundTransparency = 1
+tabBar.Position = UDim2.fromOffset(18, 70)
+tabBar.Size = UDim2.fromOffset(464, 30)
+tabBar.Parent = panel
+
+local statusTab = Instance.new("TextButton")
+statusTab.Name = "StatusTab"
+statusTab.Size = UDim2.fromOffset(100, 28)
+statusTab.Position = UDim2.fromOffset(0, 0)
+statusTab.Text = "Status"
+statusTab.Parent = tabBar
+styleButton(statusTab, Color3.fromRGB(60, 105, 190))
+
+local controlsTab = Instance.new("TextButton")
+controlsTab.Name = "ControlsTab"
+controlsTab.Size = UDim2.fromOffset(100, 28)
+controlsTab.Position = UDim2.fromOffset(108, 0)
+controlsTab.Text = "Controls"
+controlsTab.Parent = tabBar
+styleButton(controlsTab, Color3.fromRGB(47, 53, 68))
+
+local content = Instance.new("Frame")
+content.Name = "Content"
+content.BackgroundTransparency = 1
+content.Position = UDim2.fromOffset(18, 108)
+content.Size = UDim2.new(1, -36, 0, 100)
+content.Parent = panel
+
+local statusPage = Instance.new("Frame")
+statusPage.Name = "StatusPage"
+statusPage.BackgroundTransparency = 1
+statusPage.Size = UDim2.fromScale(1, 1)
+statusPage.Parent = content
+
+local controlsPage = Instance.new("Frame")
+controlsPage.Name = "ControlsPage"
+controlsPage.BackgroundTransparency = 1
+controlsPage.Size = UDim2.fromScale(1, 1)
+controlsPage.Visible = false
+controlsPage.Parent = content
+
+local statusIndicator = Instance.new("Frame")
+statusIndicator.Name = "StatusIndicator"
+statusIndicator.Size = UDim2.fromOffset(8, 8)
+statusIndicator.Position = UDim2.fromOffset(2, 7)
+statusIndicator.BackgroundColor3 = Color3.fromRGB(82, 205, 125)
+statusIndicator.BorderSizePixel = 0
+statusIndicator.Parent = statusPage
+local indicatorCorner = Instance.new("UICorner")
+indicatorCorner.CornerRadius = UDim.new(1, 0)
+indicatorCorner.Parent = statusIndicator
+
+local statusTitle = Instance.new("TextLabel")
+statusTitle.Name = "StatusTitle"
+statusTitle.BackgroundTransparency = 1
+statusTitle.Position = UDim2.fromOffset(18, 0)
+statusTitle.Size = UDim2.fromOffset(120, 22)
+statusTitle.Font = Enum.Font.GothamSemibold
+statusTitle.Text = "READY"
+statusTitle.TextColor3 = Color3.fromRGB(82, 205, 125)
+statusTitle.TextSize = 12
+statusTitle.TextXAlignment = Enum.TextXAlignment.Left
+statusTitle.Parent = statusPage
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Name = "StatusLabel"
+statusLabel.BackgroundTransparency = 1
+statusLabel.Position = UDim2.fromOffset(0, 27)
+statusLabel.Size = UDim2.new(1, 0, 1, -27)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.Text = "Ready. Choose a freekick, then press Solve & Shoot."
+statusLabel.TextColor3 = Color3.fromRGB(224, 230, 241)
+statusLabel.TextSize = 14
+statusLabel.TextWrapped = true
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.TextYAlignment = Enum.TextYAlignment.Top
+statusLabel.Parent = statusPage
+
+local controlsInfo = Instance.new("TextLabel")
+controlsInfo.Name = "ControlsInfo"
+controlsInfo.BackgroundTransparency = 1
+controlsInfo.Position = UDim2.fromOffset(0, 0)
+controlsInfo.Size = UDim2.new(1, 0, 0, 32)
+controlsInfo.Font = Enum.Font.Gotham
+controlsInfo.Text = "Presentation controls"
+controlsInfo.TextColor3 = Color3.fromRGB(165, 178, 202)
+controlsInfo.TextSize = 12
+controlsInfo.TextXAlignment = Enum.TextXAlignment.Left
+controlsInfo.Parent = controlsPage
+
+local skipButton = Instance.new("TextButton")
+skipButton.Name = "TFCAutoSkip"
+skipButton.Size = UDim2.new(1, 0, 0, 38)
+skipButton.Position = UDim2.fromOffset(0, 38)
+skipButton.Text = "Auto Skip: ON"
+skipButton.Parent = controlsPage
+styleButton(skipButton, Color3.fromRGB(42, 132, 83))
+
 local button = Instance.new("TextButton")
-button.Size = UDim2.fromOffset(200, 32)
-button.Position = UDim2.new(0.5, -100, 1, 5)
+button.Name = "SolveButton"
+button.Size = UDim2.new(1, -36, 0, 40)
+button.Position = UDim2.new(0, 18, 1, -50)
 button.Text = "Solve & Shoot"
 button.Parent = panel
-local close = Instance.new("TextButton")
-close.Size = UDim2.fromOffset(25, 25)
-close.Position = UDim2.new(1, -25, 0, 0)
-close.Text = "X"
-close.Parent = panel
+styleButton(button, Color3.fromRGB(55, 120, 235))
+
+local function setStatus(state, message)
+    statusLabel.Text = message
+
+    if state == "working" then
+        statusTitle.Text = "WORKING"
+        statusTitle.TextColor3 = Color3.fromRGB(245, 190, 75)
+        statusIndicator.BackgroundColor3 = Color3.fromRGB(245, 190, 75)
+    elseif state == "success" then
+        statusTitle.Text = "SUCCESS"
+        statusTitle.TextColor3 = Color3.fromRGB(85, 210, 140)
+        statusIndicator.BackgroundColor3 = Color3.fromRGB(85, 210, 140)
+    elseif state == "error" then
+        statusTitle.Text = "ERROR"
+        statusTitle.TextColor3 = Color3.fromRGB(235, 85, 90)
+        statusIndicator.BackgroundColor3 = Color3.fromRGB(235, 85, 90)
+    else
+        statusTitle.Text = "READY"
+        statusTitle.TextColor3 = Color3.fromRGB(82, 205, 125)
+        statusIndicator.BackgroundColor3 = Color3.fromRGB(82, 205, 125)
+    end
+end
+
+local function openTab(name)
+    local onStatus = name == "Status"
+    statusPage.Visible = onStatus
+    controlsPage.Visible = not onStatus
+    setButtonColor(statusTab, onStatus and Color3.fromRGB(60, 105, 190) or Color3.fromRGB(47, 53, 68))
+    setButtonColor(controlsTab, onStatus and Color3.fromRGB(47, 53, 68) or Color3.fromRGB(60, 105, 190))
+end
+
+statusTab.Activated:Connect(function()
+    openTab("Status")
+end)
+
+controlsTab.Activated:Connect(function()
+    openTab("Controls")
+end)
+
+local minimized = false
+local fullSize = UDim2.fromOffset(500, 270)
+local minimizedSize = UDim2.fromOffset(500, 55)
+
+minimize.Activated:Connect(function()
+    minimized = not minimized
+    if minimized then
+        content.Visible = false
+        tabBar.Visible = false
+        divider.Visible = false
+        versionLabel.Visible = false
+        button.Visible = false
+        minimize.Text = "+"
+        TweenService:Create(panel, TweenInfo.new(0.18), {Size = minimizedSize}):Play()
+        TweenService:Create(shadow, TweenInfo.new(0.18), {Size = minimizedSize}):Play()
+    else
+        minimize.Text = "—"
+        TweenService:Create(panel, TweenInfo.new(0.18), {Size = fullSize}):Play()
+        TweenService:Create(shadow, TweenInfo.new(0.18), {Size = fullSize}):Play()
+        task.delay(0.16, function()
+            if gui.Parent and not minimized then
+                content.Visible = true
+                tabBar.Visible = true
+                divider.Visible = true
+                versionLabel.Visible = true
+                button.Visible = true
+            end
+        end)
+    end
+end)
+
+local dragging = false
+local dragInput
+local dragStart
+local startPosition
+
+header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPosition = panel.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then
+                dragging = false
+            end
+        end)
+    end
+end)
+
+header.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and input == dragInput then
+        local delta = input.Position - dragStart
+        panel.Position = UDim2.new(
+            startPosition.X.Scale,
+            startPosition.X.Offset + delta.X,
+            startPosition.Y.Scale,
+            startPosition.Y.Offset + delta.Y
+        )
+        shadow.Position = UDim2.new(
+            panel.Position.X.Scale,
+            panel.Position.X.Offset + 4,
+            panel.Position.Y.Scale,
+            panel.Position.Y.Offset + 4
+        )
+    end
+end)
+
 local busy = false
 local MIN_POWER, MAX_POWER = 0.65, 0.70
 local function controlsShot()
@@ -140,7 +485,7 @@ end
 
 local function waitForGreen()
     local deadline = os.clock() + 5
-    panel.Text = "Shot calculated. Waiting for the shrinking circle to reach green..."
+    setStatus("working", "Shot calculated. Waiting for the shrinking circle to reach green...")
     while os.clock() < deadline do
         RunService.RenderStepped:Wait()
         assert(gui.Parent, "Solver closed")
@@ -440,7 +785,7 @@ local function solve()
                     addCandidate(input)
                     count += 1
                     if count % (advanced and 300 or 100) == 0 then
-                        panel.Text = difficulty..": searching curves above jumping defenders... " .. count .. " combinations"
+                        setStatus("working", difficulty..": searching curves above jumping defenders... " .. count .. " combinations")
                         task.wait()
                         assert(gui.Parent, "Solver closed")
                     end
@@ -531,7 +876,7 @@ local function solve()
             end
         end
         if i%4==0 then
-            panel.Text = difficulty..": checking jumping-wall clearance and "..scatterSamples.." scatter samples... " .. i .. "/" .. #finalists
+            setStatus("working", difficulty..": checking jumping-wall clearance and "..scatterSamples.." scatter samples... " .. i .. "/" .. #finalists)
             task.wait()
         end
     end
@@ -549,7 +894,7 @@ local function solve()
                 if info.corner then validationCorners += 1 end
             end
             if trial%32==0 then
-                panel.Text = difficulty..": validating selected shot... "..trial.."/"..validationSamples
+                setStatus("working", difficulty..": validating selected shot... "..trial.."/"..validationSamples)
                 task.wait()
                 assert(gui.Parent,"Solver closed")
             end
@@ -569,13 +914,16 @@ local function run(fire)
     if busy then return end
     busy = true
     button.Text = "Working..."
+    setButtonColor(button, Color3.fromRGB(180, 130, 45))
+    setStatus("working", "Searching for the best available shot...")
     local ok, err = pcall(function()
         local best, info = solve()
         local side = info.crossing.Z < config.Goal.CenterZ and "left" or "right"
-        panel.Text = string.format("%s keeper | %s corner | %s foot | Power %.0f%%\nAim %.1f° | Contact (%.2f, %.2f) | %d/%d simulated clear shots\n%s",
+        statusLabel.Text = string.format("%s keeper | %s corner | %s foot | Power %.0f%%\nAim %.1f° | Contact (%.2f, %.2f) | %d/%d simulated clear shots\n%s",
             info.difficulty,side,best.leg,best.power*100,best.aimYaw,best.contactX,best.contactY,info.hits,info.samples,
             fire and "Taking the best available tested shot..." or "Best available preview. These are trajectory checks, not a scoring guarantee.")
-        print("TFC_SOLVER_RESULT " .. panel.Text)
+        setStatus("success", statusLabel.Text)
+        print("TFC_SOLVER_RESULT " .. statusLabel.Text)
         print(string.format("TFC_CORNER_CHECK goalCrossing=(%.2f, %.2f, %.2f) upperCornerSamples=%d/%d mode=%s flightTime=%.3fs goalSpeed=%.1fstuds/s jumpingWallClearance=%.2fstuds keeper=%s",
             info.crossing.X, info.crossing.Y, info.crossing.Z, info.corners,info.samples, info.mode,
             info.arrival,info.goalSpeed,info.wallClearance,tostring(info.keeperPosition)))
@@ -622,11 +970,15 @@ local function run(fire)
             warn("TFC_TIMING: precision below ideal; shot was released at capped power")
         end
         task.wait(3.2)
-        panel.Text = "Shot taken. Reset/select your next freekick, then press Solve & Shoot.\nKeeper movement and random scatter can still cause misses."
+        setStatus("success", "Shot taken. Reset/select your next freekick, then press Solve & Shoot.\nKeeper movement and random scatter can still cause misses.")
     end)
-    if not ok then panel.Text = tostring(err); warn("TFC_SOLVER " .. tostring(err)) end
+    if not ok then
+        setStatus("error", tostring(err))
+        warn("TFC_SOLVER " .. tostring(err))
+    end
     busy = false
     button.Text = "Solve & Shoot"
+    setButtonColor(button, Color3.fromRGB(55, 120, 235))
 end
 button.Activated:Connect(function() run(true) end)
 print("TFC_SOLVER_READY v3 | power 65-70% | charging slot corrected")
@@ -640,29 +992,19 @@ do
     local env = getsenv(player.PlayerScripts.FootballFreekickClient)
     local gui = player.PlayerGui:FindFirstChild("TFCShotSolver")
     assert(gui, "Load the shot solver before Auto Skip")
-    local panel = gui:FindFirstChildWhichIsA("TextLabel")
+    local panel = gui:FindFirstChild("MainPanel")
     assert(panel, "Solver panel unavailable")
-    local solveButton
-    for _, child in ipairs(panel:GetChildren()) do
-        if child:IsA("TextButton") and (child.Text == "Solve & Shoot" or child.Text == "Working...") then
-            solveButton = child
-            break
-        end
-    end
+    local controls = panel:FindFirstChild("Content") and panel.Content:FindFirstChild("ControlsPage")
+    assert(controls, "Controls page unavailable")
+    local solveButton = panel:FindFirstChild("SolveButton")
+    local skipButton = controls:FindFirstChild("TFCAutoSkip")
     assert(solveButton, "Solve button unavailable")
-    solveButton.Position = UDim2.new(0.5,-210,1,5)
-    local skipButton = Instance.new("TextButton")
-    skipButton.Name = "TFCAutoSkip"
-    skipButton.Size = UDim2.fromOffset(200,32)
-    skipButton.Position = UDim2.new(0.5,10,1,5)
-    skipButton.TextColor3 = Color3.new(1,1,1)
-    skipButton.TextSize = 16
-    skipButton.Parent = panel
+    assert(skipButton, "Auto Skip button unavailable")
     if shared.TFCAutoSkipEnabled == nil then shared.TFCAutoSkipEnabled = true end
     local function draw()
-        skipButton.Text = shared.TFCAutoSkipEnabled and "Auto Skip: ON" or "Auto Skip: OFF"
-        skipButton.BackgroundColor3 = shared.TFCAutoSkipEnabled
-            and Color3.fromRGB(35,125,75) or Color3.fromRGB(65,65,70)
+        local enabled = shared.TFCAutoSkipEnabled
+        skipButton.Text = enabled and "Auto Skip: ON" or "Auto Skip: OFF"
+        setButtonColor(skipButton, enabled and Color3.fromRGB(35,125,75) or Color3.fromRGB(65,65,70))
     end
     local replay = debug.getupvalues(env.beginCharge)[13]
     assert(type(replay) == "table" and type(replay.skipHolding) == "boolean",
