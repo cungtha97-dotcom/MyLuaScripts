@@ -1,0 +1,748 @@
+-- One-click TFC shot solver for the inspected client version.
+-- Uses the game's BuildShot and SimulateShot; server randomness/keeper movement remain uncertain.
+local player = game:GetService("Players").LocalPlayer
+local root = game:GetService("ReplicatedStorage").FootballFreekick
+local config = require(root.FreeKickConfig)
+local RunService = game:GetService("RunService")
+local env = getsenv(player.PlayerScripts.FootballFreekickClient)
+assert(type(env.beginCharge) == "function" and type(env.releaseShot) == "function", "Client kick functions unavailable")
+local pg = player:WaitForChild("PlayerGui")
+for _, name in ipairs({"TFCAimHelper", "TFCShotSolver"}) do
+    local old = pg:FindFirstChild(name)
+    if old then old:Destroy() end
+end
+local oldMarker = workspace:FindFirstChild("TFCAimTarget")
+if oldMarker then oldMarker:Destroy() end
+local gui = Instance.new("ScreenGui")
+gui.Name = "TFCShotSolver"
+gui.ResetOnSpawn = false
+gui.Parent = pg
+local panel = Instance.new("TextLabel")
+panel.Size = UDim2.fromOffset(460, 110)
+panel.Position = UDim2.new(0.5, -230, 0, 30)
+panel.BackgroundColor3 = Color3.fromRGB(20, 25, 30)
+panel.TextColor3 = Color3.new(1, 1, 1)
+panel.TextSize = 16
+panel.TextWrapped = true
+panel.Text = "Ready. Choose a freekick, then press Solve & Shoot."
+panel.Parent = gui
+local button = Instance.new("TextButton")
+button.Size = UDim2.fromOffset(200, 32)
+button.Position = UDim2.new(0.5, -100, 1, 5)
+button.Text = "Solve & Shoot"
+button.Parent = panel
+local close = Instance.new("TextButton")
+close.Size = UDim2.fromOffset(25, 25)
+close.Position = UDim2.new(1, -25, 0, 0)
+close.Text = "X"
+close.Parent = panel
+local busy = false
+local MIN_POWER, MAX_POWER = 0.65, 0.70
+local function controlsShot()
+    return type(env.localControlsCurrentShot) ~= "function" or env.localControlsCurrentShot()
+end
+close.Activated:Connect(function() if not busy then gui:Destroy() end end)
+-- Learn scripted wall jumps while this helper is open. Humanoid.JumpHeight is
+-- not the active jump setting here (the inspected NPCs have JumpPower = 0).
+local shared = getgenv()
+shared.TFCMotionProfile = shared.TFCMotionProfile or {walls={},keepers={}}
+local motion = shared.TFCMotionProfile
+motion.successfulShots=motion.successfulShots or {}
+local pendingShots={}
+if shared.TFCMotionObserver then shared.TFCMotionObserver:Disconnect() end
+local lastPhase, shotStarted, keeperStart
+local observer = RunService.Heartbeat:Connect(function()
+    local runtime = workspace:FindFirstChild("FreekickSystemRuntime")
+    if not runtime then return end
+    local phase = player:GetAttribute("FootballFreekickPhase")
+    if phase=="shot" and lastPhase~="shot" then shotStarted=os.clock(); keeperStart=nil end
+    for _, obj in ipairs(runtime:GetChildren()) do
+        local kind=obj:GetAttribute("SetupObjectKind")
+        if kind=="Wall" then
+            local key=obj:GetAttribute("SetupObjectId") or obj.Name
+            local rec=motion.walls[key] or {rise=0}
+            rec.baselines=rec.baselines or {}
+            rec.timeline=rec.timeline or {}
+            motion.walls[key]=rec
+            for _, p in ipairs(obj:GetDescendants()) do
+                if p:IsA("BasePart") and p.Name=="HumanoidRootPart" then
+                    local id=p.Parent.Name
+                    if phase=="kick" then rec.baselines[id]=p.Position.Y end
+                    local base=rec.baselines[id]
+                    if phase=="shot" and shotStarted and base then
+                        local rise=math.max(0,p.Position.Y-base)
+                        local bin=math.clamp(math.ceil((os.clock()-shotStarted)*20),1,60)
+                        rec.timeline[bin]=math.max(rec.timeline[bin] or 0,rise)
+                        rec.rise=math.max(rec.rise,rise)
+                        if rise>0.15 then rec.observed=true end
+                    end
+                end
+            end
+        elseif kind=="Goalkeeper" then
+            local difficulty=obj:GetAttribute("KeeperDifficulty") or "Unknown"
+            local p=obj:FindFirstChild("HumanoidRootPart",true)
+            if p and phase=="shot" and shotStarted then
+                keeperStart=keeperStart or p.Position
+                local rec=motion.keepers[difficulty] or {speed=0,travel={}}
+                rec.travel=rec.travel or {}
+                motion.keepers[difficulty]=rec
+                local elapsed=os.clock()-shotStarted
+                local displacement=math.abs(p.Position.Z-keeperStart.Z)
+                local bin=math.clamp(math.ceil(elapsed*20),1,60)
+                rec.travel[bin]=math.max(rec.travel[bin] or 0,displacement)
+                if displacement>0.25 then rec.reaction=math.min(rec.reaction or elapsed,elapsed) end
+                rec.vertical=math.max(rec.vertical or 0,p.Position.Y-keeperStart.Y)
+            end
+        end
+    end
+    lastPhase=phase
+end)
+shared.TFCMotionObserver=observer
+local shotEvents=root.Remotes.FreeKickRemote.OnClientEvent:Connect(function(event,data)
+    if type(data)~="table" then return end
+    if event=="ShotAccepted" then
+        local u=debug.getupvalues(env.commitQueuedShot)
+        local id=data.shotSequence
+        if id and (not data.shooterUserId or data.shooterUserId==player.UserId) then
+            pendingShots[id]={leg=u[11],power=u[6],aimYaw=u[7],contactX=u[8],contactY=u[9],
+                origin=debug.getupvalues(env.beginCharge)[16]}
+        end
+    elseif event=="GoalConfirmed" then
+        local rec=pendingShots[data.shotSequence]
+        if rec then
+            table.insert(motion.successfulShots,rec)
+            if #motion.successfulShots>20 then table.remove(motion.successfulShots,1) end
+            print("TFC_LEARNED_GOAL yaw="..rec.aimYaw.." power="..rec.power.." contact="..rec.contactX..","..rec.contactY)
+            pendingShots[data.shotSequence]=nil
+        end
+    end
+end)
+gui.Destroying:Connect(function()
+    observer:Disconnect()
+    shotEvents:Disconnect()
+    if shared.TFCMotionObserver==observer then shared.TFCMotionObserver=nil end
+end)
+
+local function validateClient()
+    local u = debug.getupvalues(env.commitQueuedShot)
+    assert(#u == 11 and typeof(u[5]) == "Instance" and u[5].Name == "FreeKickRemote"
+        and type(u[6]) == "number" and type(u[11]) == "string", "Client version changed; refusing to change shot settings")
+    local r = debug.getupvalues(env.releaseShot)
+    assert(#r == 14 and type(r[2]) == "boolean" and type(r[3]) == "boolean"
+        and type(r[4]) == "boolean" and type(r[5]) == "number"
+        and type(r[6]) == "number" and type(r[7]) == "number"
+        and type(r[8]) == "number", "Release function changed")
+    local charge = debug.getupvalues(env.beginCharge)
+    assert(#charge == 20 and type(charge[7]) == "boolean" and type(charge[8]) == "number"
+        and type(charge[9]) == "number", "Precision timing function changed")
+    return u
+end
+
+local function waitForGreen()
+    local deadline = os.clock() + 5
+    panel.Text = "Shot calculated. Waiting for the shrinking circle to reach green..."
+    while os.clock() < deadline do
+        RunService.RenderStepped:Wait()
+        assert(gui.Parent, "Solver closed")
+        local u = validateClient()
+        assert(u[1] == "kick" and not u[2] and not u[3], "Kick phase changed while waiting")
+        local charge = debug.getupvalues(env.beginCharge)
+        assert(not charge[7], "Timing already locked by another shot; reset and retry")
+        local threshold = charge[9]
+        assert(threshold > 0 and threshold < 0.98, "Green timing window unavailable")
+        -- This is the same shrinking-circle phase and green threshold used by beginCharge.
+        -- Stay away from the cycle boundary so a frame delay cannot wrap the phase to red.
+        local phase = os.clock() * 1.05 % 1
+        local lower = threshold + math.min(0.02, (1-threshold)*0.2)
+        if phase >= lower and phase <= 0.98 then
+            return phase, threshold
+        end
+    end
+    error("Could not reach the green timing window; no shot started")
+end
+
+local function solve()
+    local u = validateClient()
+    assert(u[1] == "kick" and not u[2] and not u[3], "Enter the kick/aim screen first; finish the current shot if needed")
+    assert(controlsShot(), "Wait for your turn to shoot")
+    assert(not debug.getupvalues(env.releaseShot)[2], "A shot is already charging; finish it first")
+    local ball = workspace:FindFirstChild("Ball")
+    assert(ball and ball:IsA("BasePart"), "Ball unavailable")
+    assert(ball.AssemblyLinearVelocity.Magnitude < 3, "Wait until the ball is stationary")
+    local origin = ball.Position
+    local goal = env.objectiveTargetPosition or config.GoalCenter()
+    assert(math.abs(goal.X - config.Goal.X) < 1 and math.abs(goal.Z - config.Goal.CenterZ) < 1,
+        "This solver currently supports the full-size goal")
+    assert(origin.X < config.Goal.X - 2, "Reset the ball for a freekick")
+    assert(not (env.kickWindConfiguration and env.kickWindConfiguration.windEnabled),
+        "Wind is enabled; this version needs wind calibration")
+    local leg = u[11]
+    local stats = {}
+    for _, key in ipairs({"ACC", "PRE", "POW", "CUR"}) do
+        stats[key] = player:GetAttribute("FootballStat_" .. leg .. "_" .. key) or 60
+    end
+    local perks = env.currentPerks()
+    -- The firing path waits for a naturally perfect green timing score.
+    local precision = 1
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Include
+    params.FilterDescendantsInstances = {workspace.FreekickSystemRuntime}
+    local keeperParts, keeperRoot, walls = {}, nil, {}
+    local difficulty = "Easy"
+    local forward = Vector3.new(goal.X-origin.X,0,goal.Z-origin.Z).Unit
+    local lateral = Vector3.new(-forward.Z,0,forward.X)
+    for _, obj in ipairs(workspace.FreekickSystemRuntime:GetChildren()) do
+        if obj:GetAttribute("SetupObjectKind") == "Goalkeeper" then
+            difficulty = obj:GetAttribute("KeeperDifficulty") or "Unknown"
+            keeperRoot = obj:FindFirstChild("HumanoidRootPart",true) or keeperRoot
+            for _, p in ipairs(obj:GetDescendants()) do
+                if p:IsA("BasePart") and p.Transparency < 1 then table.insert(keeperParts, p) end
+            end
+        elseif obj:GetAttribute("SetupObjectKind") == "Wall" then
+            local w = {minDepth=math.huge,maxDepth=-math.huge,minSide=math.huge,maxSide=-math.huge,top=-math.huge}
+            for _, p in ipairs(obj:GetDescendants()) do
+                if p:IsA("BasePart") and p.Transparency < 1 then
+                    for _, x in ipairs({-1,1}) do for _, y in ipairs({-1,1}) do for _, z in ipairs({-1,1}) do
+                        local point = p.CFrame:PointToWorldSpace(p.Size*Vector3.new(x,y,z)/2)
+                        local d,side = (point-origin):Dot(forward),(point-origin):Dot(lateral)
+                        w.minDepth,w.maxDepth = math.min(w.minDepth,d),math.max(w.maxDepth,d)
+                        w.minSide,w.maxSide = math.min(w.minSide,side),math.max(w.maxSide,side)
+                        w.top = math.max(w.top,point.Y)
+                    end end end
+                end
+            end
+            local rec=motion.walls[obj:GetAttribute("SetupObjectId") or obj.Name]
+            -- Use height at ball arrival when timing has been observed. Do not
+            -- add a lifetime minimum-root-height error to every future jump.
+            w.jumpRise=math.max(2.5,rec and rec.rise or 0)
+            w.jumpTimeline=rec and table.clone(rec.timeline or {}) or {}
+            if w.top > -math.huge and w.minDepth > 0 then table.insert(walls,w) end
+        end
+    end
+    local advanced = difficulty ~= "Easy"
+    local hard = difficulty == "Hard" or difficulty == "Unknown"
+    local scatterSamples = advanced and (hard and 160 or 96) or 32
+    local requiredHits = advanced and math.ceil(scatterSamples * 0.60) or 1
+    -- Trajectory reliability lower bound; this does not estimate scoring odds.
+    local function reliabilityLower(hits, samples)
+        local z, p = 1.96, hits / samples
+        return (p + z*z/(2*samples)
+            - z*math.sqrt(p*(1-p)/samples + z*z/(4*samples*samples)))
+            / (1 + z*z/samples)
+    end
+    if not advanced then
+        -- Preserve the original fast Easy strategy as requested.
+        for _, w in ipairs(walls) do w.jumpRise=0; w.jumpTimeline={} end
+    end
+    local statsByLeg = {}
+    for _, foot in ipairs({"Right","Left"}) do
+        statsByLeg[foot]={}
+        for _, key in ipairs({"ACC","PRE","POW","CUR"}) do
+            statsByLeg[foot][key]=player:GetAttribute("FootballStat_"..foot.."_"..key) or 60
+        end
+    end
+    print("TFC_DIFFICULTY "..difficulty.." scatterSamples="..scatterSamples.." measuredWallJumpReserve="..tostring(walls[1] and walls[1].jumpRise))
+    -- Follow the wall-covered lane, as in the user's successful manual shots.
+    -- A keeper's small offset from center must not force a longer far-corner shot.
+    local preferredSide
+    if #walls>0 then
+        local w=walls[1]
+        local center=origin+forward*((w.minDepth+w.maxDepth)/2)+lateral*((w.minSide+w.maxSide)/2)
+        local projectedZ=origin.Z+(center.Z-origin.Z)*(goal.X-origin.X)/math.max(center.X-origin.X,0.1)
+        if math.abs(projectedZ-goal.Z)>0.5 then
+            preferredSide = projectedZ>=goal.Z and 1 or -1
+        elseif math.abs(origin.Z-goal.Z)>0.5 then
+            preferredSide = origin.Z>=goal.Z and 1 or -1
+        end
+    elseif keeperRoot and math.abs(keeperRoot.Position.Z-goal.Z)>0.6 then
+        preferredSide = keeperRoot.Position.Z < goal.Z and 1 or -1
+    end
+    print("TFC_TARGET_SIDE wallSide="..tostring(preferredSide).." origin="..tostring(origin))
+    local half = config.Goal.Width / 2 - config.BallRadius - 0.5
+    local minY = config.Field.SurfaceY + config.BallRadius + 0.3
+    local maxY = config.Field.SurfaceY + config.Goal.Height - config.BallRadius
+    local targetY = maxY - 0.85
+    local targetZ = half - 1.1
+    local function evaluate(input, seed, explore)
+        if input.power < MIN_POWER or input.power > MAX_POWER then return nil end
+        input.seed = seed
+        local shot = config.BuildShot(input)
+        local path = config.SimulateShot(shot, origin, 3, 90, true)
+        local prior = origin
+        local crossing, crossingIndex, arrival, goalSpeed
+        for i, pos in ipairs(path) do
+            if prior.X < config.Goal.X and pos.X >= config.Goal.X then
+                local alpha = (config.Goal.X - prior.X) / (pos.X - prior.X)
+                crossing = prior:Lerp(pos, alpha)
+                crossingIndex, arrival = i, (i - 1 + alpha) / 30
+                goalSpeed = (pos-prior).Magnitude*30
+                break
+            end
+            prior = pos
+        end
+        if not crossing then return nil end
+        local valid, penalty = true, 0
+        local function constraint(ok, violation)
+            if not ok then valid=false; penalty+=math.max(violation or 1,0.1)*12 end
+        end
+        constraint(math.abs(crossing.Z-goal.Z)<=half,math.abs(crossing.Z-goal.Z)-half)
+        constraint(crossing.Y>=minY,minY-crossing.Y)
+        constraint(crossing.Y<=maxY,crossing.Y-maxY)
+        local curved = math.abs(shot.curve) >= 0.12 and shot.mode ~= "Knuckle"
+        local corner = curved and crossing.Y >= maxY-2.3 and math.abs(crossing.Z-goal.Z) >= half-3.5
+        -- Aim the nominal shot at the upper corner. A scattered shot remains valid
+        -- if it clears the jumping wall and stays in the goal, even if it lands
+        -- outside the small corner target; counting those as misses was too strict.
+        -- Upper corners are a ranking preference, not grounds for discarding a
+        -- clean, curved goal-mouth shot such as a proven manual kick.
+        constraint(curved,1)
+        constraint(advanced or not preferredSide or (crossing.Z-goal.Z)*preferredSide>0,math.abs(crossing.Z-goal.Z)+1)
+        if not valid and not explore then return nil end
+        -- Require the ball to pass above the defenders, including a clearance buffer.
+        -- Testing both faces prevents a dipping ball from clipping the back of the wall.
+        local wallClearance = math.huge
+        for _, w in ipairs(walls) do
+            local crossedWall = false
+            for _, depth in ipairs({w.minDepth,w.maxDepth}) do
+                local prev = origin
+                local found, wallArrival
+                for i=1,crossingIndex do
+                    local pos = path[i]
+                    local da,db = (prev-origin):Dot(forward),(pos-origin):Dot(forward)
+                    if da<=depth and db>=depth and db-da>0.0001 then
+                        local alpha=(depth-da)/(db-da)
+                        found = prev:Lerp(pos,alpha)
+                        wallArrival=(i-1+alpha)/30
+                        break
+                    end
+                    prev=pos
+                end
+                if not found then return nil end
+                local side = (found-origin):Dot(lateral)
+                if side>=w.minSide-config.BallRadius and side<=w.maxSide+config.BallRadius then crossedWall=true end
+                local jumpAtArrival=w.jumpRise
+                local bin=math.clamp(math.ceil(wallArrival*20),1,60)
+                local timed,covered=0,false
+                -- Include neighboring frames for network and jump-timing variation.
+                for j=math.max(1,bin-2),math.min(60,bin+2) do
+                    if w.jumpTimeline[j]~=nil then covered=true; timed=math.max(timed,w.jumpTimeline[j]) end
+                end
+                if covered then jumpAtArrival=timed+0.35 end
+                local clearance = found.Y-w.top-jumpAtArrival-config.BallRadius
+                constraint(clearance>=0.5,0.5-clearance)
+                if clearance<0.5 and not explore then return nil end
+                wallClearance=math.min(wallClearance,clearance)
+            end
+            constraint(crossedWall or seed~=0,2)
+            if not crossedWall and not explore and seed==0 then return nil end
+        end
+        prior = origin
+        for i = 3, crossingIndex, 3 do
+            local pos = path[i]
+            local delta = pos - prior
+            if delta.Magnitude > 0.001 and workspace:Spherecast(prior, config.BallRadius, delta, params) then
+                constraint(false,4); if not explore then return nil end; break
+            end
+            prior = pos
+        end
+        if (crossing - prior).Magnitude > 0.001 and workspace:Spherecast(prior, config.BallRadius, crossing - prior, params) then
+            constraint(false,4); if not explore then return nil end
+        end
+        local clearance = 20
+        for _, p in ipairs(keeperParts) do
+            local predicted = p.Position + p.AssemblyLinearVelocity * math.min(arrival, 0.4)
+            clearance = math.min(clearance, (crossing - predicted).Magnitude - p.Size.Magnitude / 2)
+        end
+        local margin = math.min(half - math.abs(crossing.Z - goal.Z), crossing.Y - minY, maxY - crossing.Y)
+        local cornerError = math.sqrt((math.abs(crossing.Z-goal.Z)-targetZ)^2 + (crossing.Y-targetY)^2)
+        -- Measure lateral separation at the keeper's depth, before the goal line.
+        local keeperGap, interceptionTime=clearance,arrival
+        if keeperRoot then
+            local prev=origin
+            for i=1,crossingIndex do
+                local pos=path[i]
+                if prev.X<keeperRoot.Position.X and pos.X>=keeperRoot.Position.X then
+                    local alpha=(keeperRoot.Position.X-prev.X)/(pos.X-prev.X)
+                    local intercept=prev:Lerp(pos,alpha)
+                    local time=(i-1+alpha)/30
+                    interceptionTime=time
+                    local predicted=keeperRoot.Position+keeperRoot.AssemblyLinearVelocity*math.min(time,0.4)
+                    keeperGap=math.sqrt((intercept.Z-predicted.Z)^2+(intercept.Y-predicted.Y)^2)
+                    break
+                end
+                prev=pos
+            end
+        end
+        -- Favor upper corners with a deliberate buffer inside the frame, not the post itself.
+        local score = clearance*0.5 + keeperGap*0.8 + math.min(margin,1.5)*2
+            + 12/(arrival+0.2) + goalSpeed*0.08 - shot.scatterDegrees*0.5 - cornerError*3
+            + math.min(wallClearance,2)
+        if not advanced then
+            -- Easy: use the earlier, simpler inside-foot curve over the wall,
+            -- favor a shorter flight, and avoid excessive power/scatter.
+            score += (shot.mode=="InsideCurled" and 5 or 0) + 8/(arrival+0.2)
+                - math.max(0,input.power-0.75)*20
+        end
+        if advanced then
+            -- Reach is a conservative risk estimate, not the server's hidden save logic.
+            local learned=motion.keepers[difficulty]
+            local reach=0
+            if learned and learned.travel then
+                for bin=1,math.min(60,math.ceil(interceptionTime*20)) do reach=math.max(reach,learned.travel[bin] or 0) end
+            end
+            local pressure = hard and 1.5 or 1
+            score += keeperGap*pressure*2 + goalSpeed*0.12*pressure + 15*pressure/(arrival+0.15)
+                - math.max(0,reach+3-keeperGap)*pressure*4
+            -- Measure final-flight curvature instead of total launch deviation.
+            local lateIndex = math.clamp(math.floor(crossingIndex*0.65),2,#path)
+            local latePos, earlierPos = path[lateIndex], path[lateIndex-1]
+            local tangent = latePos-earlierPos
+            if tangent.X > 0.001 and latePos.X < config.Goal.X then
+                local projectedZ = latePos.Z+tangent.Z*(config.Goal.X-latePos.X)/tangent.X
+                score += math.min(math.abs(crossing.Z-projectedZ),6)*pressure*0.8
+            end
+        end
+        score -= penalty
+        return score, crossing, {corner=corner, curved=curved, arrival=arrival, mode=shot.mode,
+            clearance=clearance, goalSpeed=goalSpeed, wallClearance=wallClearance,valid=valid}
+    end
+    local candidates = {}
+    local count = 0
+    local function addCandidate(input)
+        local score, crossing, info = evaluate(input, 0, true)
+        if score then table.insert(candidates, {input=input, score=score, crossing=crossing, info=info}) end
+        return score
+    end
+    if advanced or #(motion.successfulShots or {})>0 then
+        local hints={{leg=u[11],aimYaw=u[7],contactX=u[8],contactY=u[9]}}
+        for _, successful in ipairs(motion.successfulShots or {}) do
+            if typeof(successful.origin)=="Vector3" and (successful.origin-origin).Magnitude<25 then table.insert(hints,successful) end
+        end
+        for _, hint in ipairs(hints) do
+            for _, yawOffset in ipairs({-2,-1,0,1,2}) do
+                for pi=130,140 do
+                    local input={ballPosition=origin,goalCenter=goal,leg=hint.leg,stats=statsByLeg[hint.leg],perks=perks,
+                        power=pi/200,aimYaw=math.clamp(hint.aimYaw+yawOffset,-config.Aim.MaxYaw,config.Aim.MaxYaw),
+                        contactX=hint.contactX,contactY=hint.contactY,precision=precision}
+                    addCandidate(input)
+                end
+                task.wait()
+            end
+        end
+    end
+    for _, testLeg in ipairs(advanced and {"Right","Left"} or {leg}) do
+    for yaw = -30, 30, advanced and 2 or 3 do
+        for pi = 130, 140 do
+            for _, cx in ipairs({-0.9,-0.75,-0.6,-0.45,0.45,0.6,0.75,0.9}) do
+                for _, cy in ipairs(advanced and {-0.95,-0.8,-0.65,-0.5,-0.35,-0.2,0,0.2,0.4,0.6} or {-0.8,-0.65,-0.5,-0.35,-0.2,0,0.2}) do
+                    local input = {ballPosition=origin, goalCenter=goal, leg=testLeg, stats=statsByLeg[testLeg], perks=perks,
+                        power=pi/200, aimYaw=yaw, contactX=cx, contactY=cy, precision=precision}
+                    addCandidate(input)
+                    count += 1
+                    if count % (advanced and 300 or 100) == 0 then
+                        panel.Text = difficulty..": searching curves above jumping defenders... " .. count .. " combinations"
+                        task.wait()
+                        assert(gui.Parent, "Solver closed")
+                    end
+                end
+            end
+        end
+    end
+    end
+    table.sort(candidates, function(a,b) return a.score > b.score end)
+    -- Keep promising shots on both sides so one corner cannot crowd out the other.
+    local starts, leftCount, rightCount = {}, 0, 0
+    local startLimit = advanced and (hard and 24 or 18) or 12
+    for _, c in ipairs(candidates) do
+        if c.crossing.Z < goal.Z and leftCount < startLimit then
+            table.insert(starts,c); leftCount += 1
+        elseif c.crossing.Z >= goal.Z and rightCount < startLimit then
+            table.insert(starts,c); rightCount += 1
+        end
+        if leftCount==startLimit and rightCount==startLimit then break end
+    end
+    -- Refine yaw, power and contact around good coarse solutions.
+    for _, c in ipairs(starts) do
+        local current, currentScore = c.input, c.score
+        for round = 1, advanced and (hard and 7 or 5) or 3 do
+            local steps = {aimYaw=1.5/round, power=0.025/round, contactX=0.08/round, contactY=0.08/round}
+            for _, key in ipairs({"aimYaw","power","contactX","contactY"}) do
+                for _, sign in ipairs({-1,1}) do
+                    local trial = table.clone(current)
+                    trial[key] += steps[key]*sign
+                    trial.aimYaw = math.clamp(trial.aimYaw,-config.Aim.MaxYaw,config.Aim.MaxYaw)
+                    trial.power = math.clamp(trial.power,MIN_POWER,MAX_POWER)
+                    trial.contactX, trial.contactY = config.ClampContact(trial.contactX,trial.contactY)
+                    local score = addCandidate(trial)
+                    if score and score > currentScore then current, currentScore = trial, score end
+                end
+            end
+            task.wait()
+        end
+    end
+    table.sort(candidates, function(a,b) return a.score > b.score end)
+    local finalists, used, landingCells = {}, {}, {}
+    local finalistLimit = advanced and (hard and 48 or 36) or 32
+    leftCount, rightCount = 0, 0
+    for _, c in ipairs(candidates) do
+        local key = string.format("%s/%.2f/%.3f/%.3f/%.3f",c.input.leg,c.input.aimYaw,c.input.power,c.input.contactX,c.input.contactY)
+        local cell = c.input.leg.."/"..math.floor(c.crossing.Y*2).."/"..math.floor(c.crossing.Z*2)
+        local left = c.crossing.Z < goal.Z
+        if c.info.valid and not used[key] and (landingCells[cell] or 0)<2
+            and ((left and leftCount<finalistLimit) or (not left and rightCount<finalistLimit)) then
+            used[key] = true
+            landingCells[cell]=(landingCells[cell] or 0)+1
+            table.insert(finalists,c)
+            if left then leftCount += 1 else rightCount += 1 end
+        end
+        if leftCount==finalistLimit and rightCount==finalistLimit then break end
+    end
+    local best, bestScore, bestInfo
+    local maxHits=0
+    for i, c in ipairs(finalists) do
+        local hits, corners, scores = 0, 0, {}
+        for trial = 1, scatterSamples do
+            local score, _, info = evaluate(c.input, trial*7919+104729)
+            if score then
+                hits += 1
+                if info.corner then corners += 1 end
+                table.insert(scores,score)
+            end
+        end
+        maxHits=math.max(maxHits,hits)
+        if hits >= requiredHits and c.info.curved then
+            table.sort(scores)
+            local conservative = scores[math.max(1,math.floor(#scores*0.2))]
+            local rank
+            if advanced then
+                -- Failed trials must count against a shot, even when its
+                -- few successful trials have excellent keeper clearance.
+                rank = reliabilityLower(hits,scatterSamples)*240
+                    + conservative + (corners/scatterSamples)*8
+            else
+                rank = conservative + hits*1.5 + corners*0.7
+            end
+            if not bestScore or rank > bestScore then
+                best, bestScore = c.input, rank
+                bestInfo = {hits=hits, corners=corners, crossing=c.crossing, mode=c.info.mode,
+                    arrival=c.info.arrival,goalSpeed=c.info.goalSpeed,wallClearance=c.info.wallClearance,
+                    keeperPosition=keeperRoot and keeperRoot.Position or nil,keeperRoot=keeperRoot,
+                    difficulty=difficulty,samples=scatterSamples}
+            end
+        end
+        if i%4==0 then
+            panel.Text = difficulty..": checking jumping-wall clearance and "..scatterSamples.." scatter samples... " .. i .. "/" .. #finalists
+            task.wait()
+        end
+    end
+    print(string.format("TFC_SEARCH_DIAGNOSTICS candidates=%d finalists=%d bestClearSamples=%d/%d required=%d",
+        #candidates,#finalists,maxHits,scatterSamples,requiredHits))
+    assert(best, "No shot met the trajectory reliability threshold. Try another position or retry after observing a wall jump.")
+    if advanced then
+        -- Fresh seeds check the winner independently of candidate selection.
+        local validationSamples = hard and 256 or 160
+        local validationHits, validationCorners = 0, 0
+        for trial=1,validationSamples do
+            local score, _, info = evaluate(best,10000019+trial*104729)
+            if score then
+                validationHits += 1
+                if info.corner then validationCorners += 1 end
+            end
+            if trial%32==0 then
+                panel.Text = difficulty..": validating selected shot... "..trial.."/"..validationSamples
+                task.wait()
+                assert(gui.Parent,"Solver closed")
+            end
+        end
+        print(string.format("TFC_VALIDATION clear=%d/%d lower95=%.3f",
+            validationHits,validationSamples,reliabilityLower(validationHits,validationSamples)))
+        assert(validationHits>=math.ceil(validationSamples*0.60),
+            "Selected shot failed fresh scatter validation; no shot taken. Try another position.")
+        bestInfo.hits,bestInfo.corners,bestInfo.samples = validationHits,validationCorners,validationSamples
+    end
+    best.seed = nil
+    assert((ball.Position-origin).Magnitude < 0.2, "Ball moved during search; retry")
+    return best, bestInfo
+end
+
+local function run(fire)
+    if busy then return end
+    busy = true
+    button.Text = "Working..."
+    local ok, err = pcall(function()
+        local best, info = solve()
+        local side = info.crossing.Z < config.Goal.CenterZ and "left" or "right"
+        panel.Text = string.format("%s keeper | %s corner | %s foot | Power %.0f%%\nAim %.1f° | Contact (%.2f, %.2f) | %d/%d simulated clear shots\n%s",
+            info.difficulty,side,best.leg,best.power*100,best.aimYaw,best.contactX,best.contactY,info.hits,info.samples,
+            fire and "Taking the best available tested shot..." or "Best available preview. These are trajectory checks, not a scoring guarantee.")
+        print("TFC_SOLVER_RESULT " .. panel.Text)
+        print(string.format("TFC_CORNER_CHECK goalCrossing=(%.2f, %.2f, %.2f) upperCornerSamples=%d/%d mode=%s flightTime=%.3fs goalSpeed=%.1fstuds/s jumpingWallClearance=%.2fstuds keeper=%s",
+            info.crossing.X, info.crossing.Y, info.crossing.Z, info.corners,info.samples, info.mode,
+            info.arrival,info.goalSpeed,info.wallClearance,tostring(info.keeperPosition)))
+        if not fire then return end
+        local u = validateClient()
+        assert(u[1] == "kick" and not u[2] and not u[3], "Kick phase changed; retry")
+        if best.leg~=u[11] then
+            assert(type(env.setLeg)=="function", "Foot selection unavailable")
+            env.setLeg(best.leg)
+        end
+        debug.setupvalue(env.commitQueuedShot, 7, best.aimYaw)
+        debug.setupvalue(env.commitQueuedShot, 8, best.contactX)
+        debug.setupvalue(env.commitQueuedShot, 9, best.contactY)
+        env.updateModeLabel()
+        local phase, threshold = waitForGreen()
+        if info.keeperRoot and info.keeperRoot.Parent then
+            assert((info.keeperRoot.Position-info.keeperPosition).Magnitude<1.5,
+                "Keeper moved during the search; press Solve & Shoot to recalculate")
+        end
+        assert(gui.Parent and controlsShot(), "Shot no longer belongs to this player")
+        assert(best.power >= MIN_POWER and best.power <= MAX_POWER, "Power outside 65-70% limit")
+        local releaseState = debug.getupvalues(env.releaseShot)
+        assert(releaseState[1] == "kick" and not releaseState[2]
+            and not releaseState[3] and not releaseState[4], "Shot state changed; retry")
+        -- Once charging starts, release before any timing assertions can throw.
+        -- releaseShot: [2]=charging, [3]=queued, [5]=charge start,
+        -- [6]=queued power, [7]=current held power, [8]=queued precision.
+        env.beginCharge()
+        releaseState = debug.getupvalues(env.releaseShot)
+        assert(releaseState[2] == true,
+            "Charging was refused: wait for your turn and close any perk selection")
+        debug.setupvalue(env.releaseShot, 5, os.clock())
+        debug.setupvalue(env.releaseShot, 7, best.power)
+        env.releaseShot()
+        local queued = debug.getupvalues(env.releaseShot)
+        assert(not queued[2] and queued[3], "Release did not queue the shot")
+        -- No yield between release and exact-power verification.
+        debug.setupvalue(env.commitQueuedShot, 6, best.power)
+        local capturedPrecision = queued[8]
+        local queuedPower = debug.getupvalues(env.commitQueuedShot)[6]
+        print(string.format("TFC_POWER_VERIFIED selected=%.4f queued=%.4f charging=%s precision=%.4f",
+            best.power,queuedPower,tostring(queued[2]),capturedPrecision))
+        if capturedPrecision < 0.999 then
+            warn("TFC_TIMING: precision below ideal; shot was released at capped power")
+        end
+        task.wait(3.2)
+        panel.Text = "Shot taken. Reset/select your next freekick, then press Solve & Shoot.\nKeeper movement and random scatter can still cause misses."
+    end)
+    if not ok then panel.Text = tostring(err); warn("TFC_SOLVER " .. tostring(err)) end
+    busy = false
+    button.Text = "Solve & Shoot"
+end
+button.Activated:Connect(function() run(true) end)
+print("TFC_SOLVER_READY v3 | power 65-70% | charging slot corrected")
+-- Loaded directly; use Solve & Shoot when your kick is ready.
+
+-- Auto Skip: use the same click/hold state as the game's own skip controls.
+do
+    local shared = getgenv()
+    if shared.TFCAutoSkipCleanup then shared.TFCAutoSkipCleanup() end
+    local player = game:GetService("Players").LocalPlayer
+    local env = getsenv(player.PlayerScripts.FootballFreekickClient)
+    local gui = player.PlayerGui:FindFirstChild("TFCShotSolver")
+    assert(gui, "Load the shot solver before Auto Skip")
+    local panel = gui:FindFirstChildWhichIsA("TextLabel")
+    assert(panel, "Solver panel unavailable")
+    local solveButton
+    for _, child in ipairs(panel:GetChildren()) do
+        if child:IsA("TextButton") and (child.Text == "Solve & Shoot" or child.Text == "Working...") then
+            solveButton = child
+            break
+        end
+    end
+    assert(solveButton, "Solve button unavailable")
+    solveButton.Position = UDim2.new(0.5,-210,1,5)
+    local skipButton = Instance.new("TextButton")
+    skipButton.Name = "TFCAutoSkip"
+    skipButton.Size = UDim2.fromOffset(200,32)
+    skipButton.Position = UDim2.new(0.5,10,1,5)
+    skipButton.TextColor3 = Color3.new(1,1,1)
+    skipButton.TextSize = 16
+    skipButton.Parent = panel
+    if shared.TFCAutoSkipEnabled == nil then shared.TFCAutoSkipEnabled = true end
+    local function draw()
+        skipButton.Text = shared.TFCAutoSkipEnabled and "Auto Skip: ON" or "Auto Skip: OFF"
+        skipButton.BackgroundColor3 = shared.TFCAutoSkipEnabled
+            and Color3.fromRGB(35,125,75) or Color3.fromRGB(65,65,70)
+    end
+    local replay = debug.getupvalues(env.beginCharge)[13]
+    assert(type(replay) == "table" and type(replay.skipHolding) == "boolean",
+        "Skip state changed; Auto Skip needs an update")
+    for _, name in ipairs({"releasePresentationSkipHold","requestMatchPresentationSkip",
+        "setMatchPresentationHold","presentationStageVoted","localControlsCurrentShot"}) do
+        assert(type(env[name]) == "function", "Skip handler unavailable: "..name)
+    end
+    local heldStage, lastStage, clicked
+    local function release()
+        if heldStage then
+            local old = heldStage
+            heldStage = nil
+            env.releasePresentationSkipHold(old)
+        end
+    end
+    local function step()
+        local phase = player:GetAttribute("FootballFreekickPhase")
+        local stage = phase == "celebrate" and "Celebration" or (phase == "replay" and "Replay" or nil)
+        if stage ~= lastStage then
+            release()
+            lastStage, clicked = stage, false
+        end
+        if not shared.TFCAutoSkipEnabled or not stage then release(); return end
+        if env.matchPresentationSkipPending or env.presentationStageVoted(stage) then
+            release()
+            return
+        end
+        if stage == "Replay" and replay.replayKind == "almost" and env.localControlsCurrentShot() then
+            release()
+            if not clicked then
+                env.requestMatchPresentationSkip(stage)
+                clicked = true
+                print("TFC_AUTO_SKIP click Replay")
+            end
+            return
+        end
+        -- Keep the normal hold active without resetting its elapsed progress.
+        -- The game's update loop requests the skip when its hold timer finishes.
+        if not replay.skipHolding then
+            replay.skipHolding = true
+            replay.skipHoldStarted = os.clock()
+            env.setMatchPresentationHold(stage,true)
+            heldStage = stage
+            print("TFC_AUTO_SKIP hold "..stage)
+        end
+    end
+    local heartbeat, destroyConnection, toggleConnection
+    local cleaned = false
+    local cleanup
+    cleanup = function()
+        if cleaned then return end
+        cleaned = true
+        if heartbeat then heartbeat:Disconnect() end
+        if destroyConnection then destroyConnection:Disconnect() end
+        if toggleConnection then toggleConnection:Disconnect() end
+        pcall(release)
+        skipButton:Destroy()
+        if shared.TFCAutoSkipCleanup == cleanup then shared.TFCAutoSkipCleanup = nil end
+    end
+    toggleConnection = skipButton.Activated:Connect(function()
+        shared.TFCAutoSkipEnabled = not shared.TFCAutoSkipEnabled
+        if not shared.TFCAutoSkipEnabled then release() end
+        draw()
+    end)
+    local elapsed = 0
+    heartbeat = game:GetService("RunService").Heartbeat:Connect(function(dt)
+        elapsed += dt
+        if elapsed < 0.1 then return end
+        elapsed = 0
+        local ok,err = pcall(step)
+        if not ok then
+            shared.TFCAutoSkipEnabled = false
+            pcall(release)
+            draw()
+            warn("TFC_AUTO_SKIP disabled: "..tostring(err))
+        end
+    end)
+    destroyConnection = gui.Destroying:Connect(cleanup)
+    shared.TFCAutoSkipCleanup = cleanup
+    draw()
+    print("TFC_AUTO_SKIP_READY "..skipButton.Text)
+end
